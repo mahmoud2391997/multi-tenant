@@ -1,0 +1,5 @@
+{
+  "name": "Zenith ERP - Multi-Tenant Accounting",
+  "description": "A sophisticated multi-tenant ERP system featuring a robust accounting module with double-entry bookkeeping, automated journal entries, and real-time trial balances.",
+  "requestFramePermissions": []
+}
