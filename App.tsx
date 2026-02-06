@@ -8,7 +8,6 @@ import Registration from './modules/core/Registration';
 import WorkspaceSelector from './modules/core/WorkspaceSelector';
 import Auth from './modules/core/Auth';
 import { APP_MODULES } from './modules/registry';
-import { DUMMY_DATA } from './initialData';
 
 const INITIAL_ACCOUNTS: Account[] = [
   { id: '1', code: '1101', name: 'الصندوق', type: AccountType.ASSET, balance: 0 },
@@ -23,13 +22,33 @@ const INITIAL_ACCOUNTS: Account[] = [
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('zenith_erp_state');
-    // If we have saved state, use it; otherwise, use our comprehensive DUMMY_DATA
+    // If we have saved state, use it; otherwise, use a default empty state
     if (saved) return JSON.parse(saved);
-    return DUMMY_DATA;
+    return {
+      users: [],
+      currentUserId: null,
+      companies: [],
+      currentCompanyId: null,
+      accounts: {},
+      entries: {},
+      products: {},
+      warehouses: {},
+      employees: {},
+      leads: {},
+      payrolls: {},
+    };
   });
 
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
+
+  useEffect(() => {
+    fetch('http://localhost:3000/users')
+      .then(res => res.json())
+      .then(users => {
+        setState(prevState => ({ ...prevState, users }));
+      });
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('zenith_erp_state', JSON.stringify(state));
