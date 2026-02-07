@@ -9,21 +9,27 @@ import WorkspaceSelector from './modules/core/WorkspaceSelector';
 import Auth from './modules/core/Auth';
 import { APP_MODULES } from './modules/registry';
 
-const INITIAL_ACCOUNTS: Account[] = [
-  { id: '1', code: '1101', name: 'الصندوق', type: AccountType.ASSET, balance: 0 },
-  { id: '2', code: '1102', name: 'البنك', type: AccountType.ASSET, balance: 0 },
-  { id: '3', code: '1201', name: 'حسابات المدينين', type: AccountType.ASSET, balance: 0 },
-  { id: '4', code: '2101', name: 'حسابات الدائنين', type: AccountType.LIABILITY, balance: 0 },
-  { id: '5', code: '3101', name: 'رأس المال', type: AccountType.EQUITY, balance: 0 },
-  { id: '6', code: '4101', name: 'إيراد المبيعات', type: AccountType.REVENUE, balance: 0 },
-  { id: '7', code: '5101', name: 'مصاريف تشغيلية', type: AccountType.EXPENSE, balance: 0 },
-];
+// API Base URL - Backend server runs on port 3001
+const API_BASE_URL = 'http://localhost:3001';
+
+const DEFAULT_COMPANY: Company = {
+  id: 'default-company',
+  name: 'شركة افتراضية',
+  adminEmail: 'admin@default.com',
+  activeModules: [ModuleType.ACCOUNTING],
+  createdAt: Date.now(),
+};
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>(() => {
     const saved = localStorage.getItem('zenith_erp_state');
-    // If we have saved state, use it; otherwise, use a default empty state
-    if (saved) return JSON.parse(saved);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Failed to parse saved state');
+      }
+    }
     return {
       users: [],
       currentUserId: null,
@@ -36,6 +42,7 @@ const App: React.FC = () => {
       employees: {},
       leads: {},
       payrolls: {},
+      invoices: {},
     };
   });
 
@@ -43,12 +50,54 @@ const App: React.FC = () => {
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
 
   useEffect(() => {
-    fetch('http://localhost:3000/users')
-      .then(res => res.json())
+    // Fetch users (this will also test backend connection)
+    fetch(`${API_BASE_URL}/users`)
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`Server returned ${res.status}`);
+        }
+        return res.json();
+      })
       .then(users => {
+        console.log('✅ Backend connected - Users fetched:', users.length);
         setState(prevState => ({ ...prevState, users }));
+      })
+      .catch(err => {
+        console.error('❌ Backend connection failed:', err);
+        alert('⚠️ Cannot connect to backend server. Make sure the server is running on port 3001.');
+      });
+    
+    // Fetch companies with active modules
+    fetch(`${API_BASE_URL}/companies`)
+      .then(res => res.json())
+      .then(companies => {
+        console.log('✅ Companies fetched with active modules:', companies.length);
+        setState(prevState => ({ ...prevState, companies }));
+      })
+      .catch(err => {
+        console.error('Error fetching companies:', err);
       });
   }, []);
+
+  // Fetch entity data when company changes
+  useEffect(() => {
+    if (state.currentCompanyId) {
+      const entities = ['accounts', 'journal-entries', 'products', 'warehouses', 'employees', 'leads', 'payroll-records'];
+      entities.forEach(entity => {
+        fetchEntityData(entity, state.currentCompanyId);
+      });
+    }
+  }, [state.currentCompanyId]);
+
+  // Initialize empty arrays for new companies
+  useEffect(() => {
+    if (state.currentCompanyId && !state.entries[state.currentCompanyId]) {
+      setState(prev => ({
+        ...prev,
+        entries: { ...prev.entries, [state.currentCompanyId]: [] }
+      }));
+    }
+  }, [state.currentCompanyId, state.entries]);
 
   useEffect(() => {
     localStorage.setItem('zenith_erp_state', JSON.stringify(state));
@@ -59,77 +108,217 @@ const App: React.FC = () => {
   , [state.users, state.currentUserId]);
 
   const currentCompany = useMemo(() => 
-    state.companies.find(c => c.id === state.currentCompanyId) || null
+    state.companies.find(c => c.id === state.currentCompanyId) || DEFAULT_COMPANY
   , [state.companies, state.currentCompanyId]);
 
-  const handleRegisterUser = (enterpriseName: string, adminName: string, email: string, pass: string) => {
-    const userId = crypto.randomUUID();
-    const companyId = crypto.randomUUID();
-
-    const newUser: User = {
-      id: userId,
-      name: adminName,
-      email,
-      password: pass,
-      companyIds: [companyId]
-    };
-
-    const newCompany: Company = {
-      id: companyId,
-      name: enterpriseName,
-      adminEmail: email,
-      activeModules: [ModuleType.ACCOUNTING],
-      createdAt: Date.now(),
-    };
-
-    setState(prev => ({
-      ...prev,
-      users: [...prev.users, newUser],
-      currentUserId: userId,
-      companies: [...prev.companies, newCompany],
-      currentCompanyId: companyId,
-      accounts: { ...prev.accounts, [companyId]: INITIAL_ACCOUNTS },
-      entries: { ...prev.entries, [companyId]: [] },
-      products: { ...prev.products, [companyId]: [] },
-      warehouses: { ...prev.warehouses, [companyId]: [] },
-      employees: { ...prev.employees, [companyId]: [] },
-      leads: { ...prev.leads, [companyId]: [] },
-      payrolls: { ...prev.payrolls, [companyId]: [] },
-    }));
+  const handleLogin = async (user: User) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/${user.id}`);
+      const userData = await response.json();
+      
+      if (userData.memberships && userData.memberships.length > 0) {
+        const companies = userData.memberships.map((m: any) => ({
+          ...m.company,
+          createdAt: m.company.created_at,
+          activeModules: m.company.active_modules?.map((am: any) => am.module_name) || []
+        }));
+        const firstCompany = companies[0];
+        
+        // Clear localStorage to force fresh data
+        localStorage.removeItem('zenith_erp_state');
+        
+        setState(prev => ({ 
+          ...prev, 
+          currentUserId: user.id,
+          currentCompanyId: firstCompany.id,
+          companies
+        }));
+      } else {
+        setState(prev => ({ 
+          ...prev, 
+          currentUserId: user.id,
+          companies: []
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching user companies:', error);
+      setState(prev => ({ ...prev, currentUserId: user.id }));
+    }
   };
 
-  const handleLogin = (user: User) => {
-    setState(prev => ({ ...prev, currentUserId: user.id }));
+  const handleRegisterUser = async (name: string, email: string, password: string, companyName: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, password, companyName }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Registration failed');
+      
+      setState(prev => ({ 
+        ...prev, 
+        currentUserId: data.user.id,
+        currentCompanyId: data.company.id,
+        companies: [{ ...data.company, activeModules: ['ACCOUNTING'] }],
+      }));
+    } catch (err: any) {
+      console.error('Registration error:', err.message);
+      throw err;
+    }
   };
 
-  const handleRegisterCompany = (companyName: string, email: string) => {
-    if (!state.currentUserId) return;
-    const id = crypto.randomUUID();
-    const newCompany: Company = {
-      id: id,
-      name: companyName,
-      adminEmail: email,
-      activeModules: [ModuleType.ACCOUNTING],
-      createdAt: Date.now(),
-    };
-
-    setState(prev => ({
-      ...prev,
-      companies: [...prev.companies, newCompany],
-      currentCompanyId: id,
-      users: prev.users.map(u => u.id === prev.currentUserId ? { ...u, companyIds: [...u.companyIds, id] } : u),
-      accounts: { ...prev.accounts, [id]: INITIAL_ACCOUNTS },
-      entries: { ...prev.entries, [id]: [] },
-      products: { ...prev.products, [id]: [] },
-      warehouses: { ...prev.warehouses, [id]: [] },
-      employees: { ...prev.employees, [id]: [] },
-      leads: { ...prev.leads, [id]: [] },
-      payrolls: { ...prev.payrolls, [id]: [] },
-    }));
-    setIsCreatingWorkspace(false);
+  const handleRegisterCompany = async (companyName: string, email: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          name: 'Admin User', 
+          email: email, 
+          password: 'default123', 
+          companyName: companyName 
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Registration failed');
+      
+      // Clear localStorage to force fresh data
+      localStorage.removeItem('zenith_erp_state');
+      
+      setState(prev => ({
+        ...prev,
+        currentCompanyId: data.company.id,
+        companies: [...prev.companies, data.company],
+        users: [...prev.users, data.user],
+      }));
+      setIsCreatingWorkspace(false);
+    } catch (err: any) {
+      console.error('Company registration error:', err.message);
+      alert('Registration failed: ' + err.message);
+    }
   };
 
-  const updateList = <T extends { id: string }>(
+  // API Service Functions
+  const apiCall = async (method: string, endpoint: string, data?: any) => {
+    console.log(`API Call: ${method} ${endpoint}`, data);
+    
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    
+    console.log(`API Response status: ${response.status} ${response.statusText}`);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`API Error Response:`, errorText);
+      throw new Error(errorText || 'API call failed');
+    }
+    
+    // Handle 204 No Content responses (like delete operations)
+    if (response.status === 204) {
+      console.log(`API Response: No content (204)`);
+      return null; // or return a success indicator
+    }
+    
+    const result = await response.json();
+    console.log(`API Response data:`, result);
+    return result;
+  };
+
+  const fetchEntityData = async (entity: string, companyId?: string) => {
+    try {
+      const endpoint = companyId ? `/${entity}?companyId=${companyId}` : `/${entity}`;
+      console.log(`Fetching ${entity} for companyId: ${companyId}`);
+      const data = await apiCall('GET', endpoint);
+      console.log(`Fetched ${entity} data:`, data);
+      
+      if (companyId && data && Array.isArray(data)) {
+        // Map backend entity names to frontend state keys
+        const entityToStateKey: Record<string, string> = {
+          'accounts': 'accounts',
+          'journal-entries': 'entries',
+          'products': 'products',
+          'warehouses': 'warehouses',
+          'employees': 'employees',
+          'leads': 'leads',
+          'payroll-records': 'payrolls'
+        };
+        
+        const stateKey = entityToStateKey[entity] || entity;
+        console.log(`Setting state for ${stateKey} with ${data.length} items`);
+        setState(prev => ({
+          ...prev,
+          [stateKey]: { ...prev[stateKey as keyof AppState], [companyId]: data }
+        }));
+      } else if (companyId && data === null) {
+        // Handle case where data is null (shouldn't happen for GET requests but just in case)
+        console.log(`Received null data for ${entity}, using empty array`);
+        const entityToStateKey: Record<string, string> = {
+          'accounts': 'accounts',
+          'journal-entries': 'entries',
+          'products': 'products',
+          'warehouses': 'warehouses',
+          'employees': 'employees',
+          'leads': 'leads',
+          'payroll-records': 'payrolls'
+        };
+        
+        const stateKey = entityToStateKey[entity] || entity;
+        setState(prev => ({
+          ...prev,
+          [stateKey]: { ...prev[stateKey as keyof AppState], [companyId]: [] }
+        }));
+      } else {
+        console.warn(`No valid data or invalid format for ${entity}:`, data);
+      }
+    } catch (error) {
+      console.error(`Error fetching ${entity}:`, error);
+      // Don't throw the error to prevent logging out
+    }
+  };
+
+  const updateEntity = async <T extends { id: string }>(
+    entity: string,
+    action: 'add' | 'edit' | 'delete',
+    item: T | string,
+    companyId?: string
+  ) => {
+    try {
+      let result;
+      
+      if (action === 'add') {
+        const addItem = item as any;
+        console.log(`Adding ${entity} with data:`, { ...addItem, companyId: companyId });
+        result = await apiCall('POST', `/${entity}`, { ...addItem, companyId: companyId });
+      } else if (action === 'edit') {
+        const editItem = item as T;
+        console.log(`Editing ${entity} with data:`, { ...editItem, companyId: companyId });
+        result = await apiCall('PUT', `/${entity}/${editItem.id}`, { ...editItem, companyId: companyId });
+      } else {
+        const idToDelete = item as string;
+        console.log(`Deleting ${entity} with id:`, idToDelete);
+        await apiCall('DELETE', `/${entity}/${idToDelete}`);
+        result = idToDelete;
+      }
+      
+      console.log(`${action} ${entity} result:`, result);
+      
+      // Refresh the entity data after operation
+      if (companyId) {
+        await fetchEntityData(entity, companyId);
+      }
+      
+      return result;
+    } catch (error) {
+      console.error(`Error updating ${entity}:`, error);
+      throw error;
+    }
+  };
+
+  const updateList = async <T extends { id: string }>(
     key: keyof Omit<AppState, 'companies' | 'currentCompanyId' | 'users' | 'currentUserId'>,
     action: 'add' | 'edit' | 'delete',
     item: T | string
@@ -137,80 +326,87 @@ const App: React.FC = () => {
     if (!state.currentCompanyId) return;
     const cid = state.currentCompanyId;
     
-    setState(prev => {
-      const record = prev[key] as unknown as Record<string, T[]>;
-      const currentList = record[cid] || [];
-      let newList: T[];
-
-      if (action === 'add') {
-        newList = [...currentList, item as T];
-      } else if (action === 'edit') {
-        const editedItem = item as T;
-        newList = currentList.map(i => i.id === editedItem.id ? editedItem : i);
-      } else {
-        const idToDelete = item as string;
-        newList = currentList.filter(i => i.id !== idToDelete);
-      }
-
-      return {
-        ...prev,
-        [key]: { ...record, [cid]: newList }
+    try {
+      const entityMap: Record<string, string> = {
+        accounts: 'accounts',
+        entries: 'journal-entries',
+        products: 'products',
+        warehouses: 'warehouses',
+        employees: 'employees',
+        leads: 'leads',
+        payrolls: 'payroll-records',
+        'payroll-records': 'payroll-records'
       };
-    });
+      
+      const entity = entityMap[key as string];
+      if (!entity) {
+        console.error(`No entity mapping found for key: ${key}`);
+        return;
+      }
+      
+      await updateEntity(entity, action, item, cid);
+    } catch (error) {
+      console.error(`Error in updateList for ${key}:`, error);
+    }
   };
 
-  const addJournalEntry = (entry: Omit<JournalEntry, 'id'>) => {
+  const addJournalEntry = async (entry: Omit<JournalEntry, 'id'>) => {
     if (!state.currentCompanyId) return;
     const companyId = state.currentCompanyId;
-    const newEntry: JournalEntry = { ...entry, id: crypto.randomUUID() };
-
-    setState(prev => {
-      const companyAccounts = prev.accounts[companyId].map(acc => {
-        const lines = entry.lines.filter(l => l.accountId === acc.id);
-        const totalDebit = lines.reduce((sum, l) => sum + l.debit, 0);
-        const totalCredit = lines.reduce((sum, l) => sum + l.credit, 0);
-        
-        let newBalance = acc.balance;
-        if (acc.type === AccountType.ASSET || acc.type === AccountType.EXPENSE) {
-          newBalance += (totalDebit - totalCredit);
-        } else {
-          newBalance += (totalCredit - totalDebit);
-        }
-
-        return { ...acc, balance: newBalance };
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/journal-entries`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...entry, companyId }),
       });
-
-      return {
+      
+      if (!response.ok) throw new Error('Failed to create journal entry');
+      const newEntry = await response.json();
+      
+      setState(prev => ({
         ...prev,
-        entries: {
-          ...prev.entries,
-          [companyId]: [...prev.entries[companyId], newEntry]
-        },
-        accounts: {
-          ...prev.accounts,
-          [companyId]: companyAccounts
-        }
-      };
-    });
+        entries: { ...prev.entries, [companyId]: [...(prev.entries[companyId] || []), newEntry] }
+      }));
+      
+      console.log('Journal entry saved successfully:', newEntry);
+    } catch (error) {
+      console.error('Error adding journal entry:', error);
+      alert('فشل في حفظ القيد');
+    }
   };
 
-  const toggleModule = (module: ModuleType) => {
+  const toggleModule = async (module: ModuleType) => {
     if (!state.currentCompanyId) return;
-    setState(prev => ({
-      ...prev,
-      companies: prev.companies.map(c => {
-        if (c.id === prev.currentCompanyId) {
-          const activeModules = c.activeModules.includes(module)
-            ? c.activeModules.filter(m => m !== module)
-            : [...c.activeModules, module];
-          return { ...c, activeModules };
-        }
-        return c;
-      })
-    }));
+    const cid = state.currentCompanyId;
+    const company = state.companies.find(c => c.id === cid);
+    const isActive = company?.activeModules?.includes(module);
+    
+    try {
+      if (isActive) {
+        await fetch(`${API_BASE_URL}/active-modules/company/${cid}/module/${module}`, { method: 'DELETE' });
+      } else {
+        await fetch(`${API_BASE_URL}/active-modules`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyId: cid, moduleName: module }),
+        });
+      }
+      
+      // Refresh companies from server to get updated active modules from database
+      const companiesResponse = await fetch(`${API_BASE_URL}/companies`);
+      const updatedCompanies = await companiesResponse.json();
+      
+      setState(prev => ({
+        ...prev,
+        companies: updatedCompanies,
+      }));
+    } catch (error) {
+      console.error('Error toggling module:', error);
+    }
   };
 
-  // AUTH BRANCH
+  // AUTH BRANCH - Show login/registration when not authenticated
   if (!state.currentUserId) {
     return (
       <Auth 
@@ -223,22 +419,11 @@ const App: React.FC = () => {
 
   // TENANT BRANCH
   if (!state.currentCompanyId) {
-    const userCompanies = state.companies.filter(c => currentUser?.companyIds.includes(c.id));
-    
-    if (userCompanies.length > 0 && !isCreatingWorkspace) {
-      return (
-        <WorkspaceSelector 
-          companies={userCompanies}
-          onSelect={(id) => setState(p => ({...p, currentCompanyId: id}))}
-          onCreateNew={() => setIsCreatingWorkspace(true)}
-        />
-      );
-    }
-
+    // Show Registration when no company selected
     return (
       <Registration 
         onRegister={handleRegisterCompany} 
-        hasCompanies={userCompanies.length > 0}
+        hasCompanies={false}
         onBackToList={() => setIsCreatingWorkspace(false)}
       />
     );
@@ -260,7 +445,7 @@ const App: React.FC = () => {
     for (const module of APP_MODULES) {
       const tab = module.tabs.find(t => t.id === activeTab);
       if (tab) {
-        if (!currentCompany?.activeModules.includes(module.type)) {
+        if (!(currentCompany?.activeModules || []).includes(module.type)) {
           return (
             <div className="flex flex-col items-center justify-center h-full text-slate-500 animate-in fade-in zoom-in duration-300">
               <svg className="w-20 h-20 mb-6 text-rose-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -275,24 +460,71 @@ const App: React.FC = () => {
 
         const Component = tab.component;
         const props: any = {
-          accounts: state.accounts[cid] || [],
-          entries: state.entries[cid] || [],
-          products: state.products[cid] || [],
-          warehouses: state.warehouses[cid] || [],
-          employees: state.employees[cid] || [],
-          leads: state.leads[cid] || [],
-          payrolls: state.payrolls[cid] || [],
+          accounts: state.accounts?.[cid] || [],
+          entries: state.entries?.[cid] || [],
+          products: state.products?.[cid] || [],
+          warehouses: state.warehouses?.[cid] || [],
+          employees: state.employees?.[cid] || [],
+          payroll: state.payrolls?.[cid] || [],
+          payrolls: state.payrolls?.[cid] || [],
+          leads: state.leads?.[cid] || [],
+          invoices: state.entries?.[cid]?.filter(entry => entry.reference?.startsWith('INV-') || entry.reference?.startsWith('PAY-')) || [],
           onAction: (entity: string, action: string, data: any) => {
-            const map: any = { coa: 'accounts', journal: 'entries', products: 'products', warehouses: 'warehouses', employees: 'employees', payroll: 'payrolls', leads: 'leads' };
-            updateList(map[tab.id], action as any, data);
+            const map: any = { coa: 'accounts', journal: 'entries', products: 'products', warehouses: 'warehouses', employees: 'employees', payroll: 'payroll-records', leads: 'leads' };
+            updateList(map[entity], action as any, data);
           },
-          onAdd: tab.id === 'journal' ? addJournalEntry : undefined,
-          onPostInvoice: tab.id === 'invoices' ? addJournalEntry : undefined
+          onRefresh: async () => {
+            // Refresh the current active tab's data
+            const tabEntityMap: Record<string, string> = {
+              'dashboard': 'accounts', // Dashboard shows accounts summary
+              'coa': 'accounts',
+              'journal': 'journal-entries',
+              'products': 'products',
+              'warehouses': 'warehouses',
+              'employees': 'employees',
+              'payroll': 'payroll-records',
+              'leads': 'leads',
+              'invoices': 'journal-entries'
+            };
+            
+            const entityToRefresh = tabEntityMap[activeTab] || 'products';
+            console.log(`Refreshing ${entityToRefresh} for tab ${activeTab}`);
+            await fetchEntityData(entityToRefresh, cid);
+          },
+          onPostInvoice: addJournalEntry,
+          onEdit: async (entry: any) => {
+            console.log('Editing invoice:', entry);
+            try {
+              const result = await updateEntity('journal-entries', 'edit', entry, cid);
+              console.log('Edit result:', result);
+              if (result) {
+                setState(prev => ({
+                  ...prev,
+                  entries: { ...prev.entries, [cid]: (prev.entries[cid] || []).map(e => e.id === entry.id ? { ...e, ...entry } : e) }
+                }));
+              }
+            } catch (error) {
+              console.error('Edit error:', error);
+              alert('فشل تحديث الفاتورة');
+            }
+          },
+          onDelete: async (id: string) => {
+            try {
+              await fetch(`http://localhost:3001/journal-entries/${id}`, { method: 'DELETE' });
+              setState(prev => ({
+                ...prev,
+                entries: { ...prev.entries, [cid]: (prev.entries[cid] || []).filter(e => e.id !== id) }
+              }));
+            } catch (error) {
+              alert('فشل حذف الفاتورة');
+            }
+          },
         };
-        
+
         return <Component {...props} />;
       }
     }
+
     return <div>الصفحة غير موجودة</div>;
   };
 
